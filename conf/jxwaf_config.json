@@ -1,5 +1,8 @@
 {
-    "waf_api_key": "3d96848e-bab2-40b7-8c0b-abac3b613585",
+    "waf_api_key": "5fc335bc-d778-4d90-ab3f-ece36bad4a24",
+    "waf_api_password": "6bace0ac-ddca-412f-b768-81407044ea0c",
+    "waf_update_website": "http://192.144.136.144/waf_update",
     "waf_local":"false"
+    
 }
 

@@ -3,7 +3,6 @@ local request = require "resty.jxwaf.request"
 local transform = require "resty.jxwaf.transform"
 local operator = require "resty.jxwaf.operator"
 local resty_random = require "resty.random"
-local str = require "resty.string"
 local pairs = pairs
 local ipairs = ipairs
 local table_insert = table.insert
@@ -12,24 +11,22 @@ local table_concat = table.concat
 local http = require "resty.jxwaf.http"
 local upload = require "resty.upload"
 local limitreq = require "resty.jxwaf.limitreq"
+local geo = require 'resty.jxwaf.maxminddb'
+local ngx_md5 = ngx.md5
 local _M = {}
-_M.version = "1.0"
+_M.version = "2.0"
 
 
 local _config_path = "/opt/jxwaf/nginx/conf/jxwaf/jxwaf_config.json"
 local _local_config_path = "/opt/jxwaf/nginx/conf/jxwaf/jxwaf_local_config.json"
-local _local_base_config_path = "/opt/jxwaf/nginx/conf/jxwaf/jxwaf_local_base_config.json"
+local _config_geo_path = "/opt/jxwaf/nginx/conf/jxwaf/GeoLite2-Country.mmdb"
+local _update_waf_rule = {}
 local _config_info = {}
-local _rules = {}
-local _resp_rules = {}
-local _limit_req_rules = {}
-local _resp_header_chunk = nil
-local function _sort_rules(a,b)
-        return tonumber(a.rule_id)<tonumber(b.rule_id)
-end
+local _auto_update = "true"
+local _auto_update_period = "300"
 
 
-local function _process_request(var,otp)
+local function _process_request(var)
 	local t = request.request[var.rule_var]()
 	if type(t) ~= "string" and type(t) ~= "table" then
 		ngx.log(ngx.ERR,"run fail,can not decode http args ",type(t).."   "..var.rule_var)
@@ -41,36 +38,26 @@ local function _process_request(var,otp)
 	end
 	
 	local rule_var = var.rule_var
-
-	if (rule_var == "ARGS" or rule_var == "ARGS_GET" or rule_var == "ARGS_POST" or rule_var == "REQUEST_COOKIES" or rule_var == "REQUEST_HEADERS" or rule_var == "RESP_HEADERS" ) then
-		
-	
+	if (rule_var == "ARGS_GET" or rule_var == "ARGS_POST" or rule_var == "ARGS_HEADERS" or rule_var == "ARGS_COOKIES" ) then
 		if( type(var.rule_specific) == "table" ) then
 			local specific_result = {}
 			for _,v in ipairs(var.rule_specific) do
 				local specific = t[v]
 				if specific ~= nil then
-					
 					specific_result[v] = specific
 				end
 			end
-			
-			
 			return specific_result
 		end
-		
+    
 		if( type(var.rule_ignore) == "table" ) then
 			local ignore_result = {}
 			ignore_result = t
 			for _,v in ipairs(var.rule_ignore) do
 				ignore_result[string.lower(v)] = nil
 			end
-			
 			return ignore_result
- 
-		
 		end				
-				
 	end
 	
 	return t
@@ -79,22 +66,21 @@ end
 
 
 function _M.process_request(var)
-
 	return _process_request(var)
 end
 
 
 
 local function _process_transform(process_request,rule_transform,var)
-        if type(process_request) ~= "string" and type(process_request) ~= "table" then
-                ngx.log(ngx.ERR,"run fail,can not transfrom http args")
-                ngx.exit(500)
-        end
+  if type(process_request) ~= "string" and type(process_request) ~= "table" then
+    ngx.log(ngx.ERR,"run fail,can not transfrom http args")
+    ngx.exit(500)
+  end
 
 	if  type(rule_transform) ~= "table" then
-                ngx.log(ngx.ERR,"run fail,can not decode config file,transfrom error")
-                ngx.exit(500)
-        end
+    ngx.log(ngx.ERR,"run fail,can not decode config file,transfrom error")
+    ngx.exit(500)
+  end
 
 	if type(process_request) == "string" then
 		local string_result = process_request
@@ -106,451 +92,162 @@ local function _process_transform(process_request,rule_transform,var)
 
 	local result = {}
 	local rule_var = var.rule_var
-	if (rule_var == "ARGS" or rule_var == "ARGS_GET" or rule_var == "ARGS_POST" or rule_var == "REQUEST_COOKIES" or rule_var == "REQUEST_HEADERS" or rule_var == "RESP_HEADERS") then
+	if (rule_var == "ARGS_GET" or rule_var == "ARGS_POST" or rule_var == "ARGS_HEADERS" or rule_var == "ARGS_COOKIES" ) then
 		for k,v in pairs(process_request) do
-                        if type(v) == "table" then
-				local _result_table = {}
-                                for _,_v in ipairs(v) do
-					local _result = _v
-                                        for _,__v in ipairs(rule_transform) do
-                                                _result = transform.request[__v](_result)
-                                        end 
-					if type(_result) == "string" then
-						table_insert(_result_table,_result)
-					end
-                                end
-				result[k] = _result_table
-
-                        else
-				local _result = v
-                                for _,_v in ipairs(rule_transform) do
-		
-                                        _result = transform.request[_v](_result)
-                                end
-				if type(_result) == "string" then
-					result[k] = _result
-				end
-                        end
-                end
+      if type(v) == "table" then
+      local _result_table = {}
+      for _,_v in ipairs(v) do
+        local _result = _v
+        for _,__v in ipairs(rule_transform) do
+          _result = transform.request[__v](_result)
+        end 
+        if type(_result) == "string" then
+          table_insert(_result_table,_result)
+        end
+      end
+      result[k] = _result_table
+      else
+        local _result = v
+        for _,_v in ipairs(rule_transform) do
+          _result = transform.request[_v](_result)
+        end
+        if type(_result) == "string" then
+          result[k] = _result
+        end
+      end
+    end
 	else
 		for _,v in ipairs(process_request) do
 			local _result = v
 			for _,_v in ipairs(rule_transform) do
-		
 				_result = transform.request[_v](_result)
 			end
-
 			if type(_result) == "string" then
 				table_insert(result,_result)
 			end
 		end
 	end
-
 	return result 
-
 end
 
 
 local function _process_operator( process_transform , match , var , rule )
 	local rule_operator = match.rule_operator
 	local rule_pattern = match.rule_pattern
-	local rule_negated = match.rule_negated
 	local rule_var = var.rule_var
 	if type(process_transform) ~= "string" and type(process_transform) ~= "table" then
 		ngx.log(ngx.ERR,"run fail,can not operator http args")
-                ngx.exit(500)
-        end
+    ngx.exit(500)
+  end
 	if type(rule_operator) ~= "string" and type(rule_pattern) ~= "string" then
 		ngx.log(ngx.ERR,"rule_operator and rule_pattern error")
 		ngx.exit(500)
 	end
 	
 	if type(process_transform) == "string" then
-		local result ,value,captures
-		result,value,captures = operator.request[rule_operator](process_transform,rule_pattern)
-		if rule_negated == "true" then
-			result = not result
-		end
-
+		local result ,value
+		result,value = operator.request[rule_operator](process_transform,rule_pattern)
 		if result  then
-			return result,value,rule_var,captures
+			return result,value,rule_var
 		else
 			return result
 		end
-
 	end
-	
- 
-	if (rule_var == "ARGS" or rule_var == "ARGS_GET" or rule_var == "ARGS_POST" or rule_var == "REQUEST_COOKIES" or rule_var == "REQUEST_HEADERS" or rule_var == "RESP_HEADERS") then
+
+	if (rule_var == "ARGS_GET" or rule_var == "ARGS_POST" or rule_var == "ARGS_HEADERS" or rule_var == "ARGS_COOKIES" ) then
 		for k,v in pairs(process_transform) do
 			if type(v) == "table" then
 				for _,_v in ipairs(v) do
-					local result,value,captures
-					result,value,captures = operator.request[rule_operator](_v,rule_pattern)	
-					if rule_negated == "true" then
-						result = not result
-					end
+					local result,value
+					result,value = operator.request[rule_operator](_v,rule_pattern)	
 					if result  then
-						return result,value,k,captures
+						return result,value,k
 					end
 				end
 			else
-				local result,value,captures
-				result,value,captures = operator.request[rule_operator](v,rule_pattern) 
-                                if rule_negated == "true" then
-                                	result = not result
-                                end
-			
-                                if result  then
-                                	return result,value,k,captures
-                                end
+				local result,value
+				result,value = operator.request[rule_operator](v,rule_pattern) 
+        if result  then
+          return result,value,k
+        end
 			end
 		end	
-	
 	else
 		for _,v in ipairs(process_transform) do
-			local result,value,captures
-			result,value,captures = operator.request[rule_operator](v,rule_pattern)
-			if rule_negated == "true" then
-				result = not result
-			end
-
+			local result,value
+			result,value = operator.request[rule_operator](v,rule_pattern)
 			if result  then
-				return result,value,rule_var,captures
+				return result,value,rule_var
 			end
-
-
 		end
-
-
 	end
-
-
 	return false
-
 end
 
-
-
-local function _rule_match(rules)
-	local result
-	local rule_observ_log = {}
-	for _,rule in ipairs(rules) do
-		
-		if _config_info.limitreq_engine == "true" and rule.rule_global == "true"   then    --limit_req start
-
-		local process_key
-		local limit_var = {}
-		for _,var in ipairs(rule.rule_key_vars) do
-			local process_request_var = _process_request(var)
-			if type(process_request_var) == "table" then
-				for _,v in pairs(process_request_var) do
-					if type(v) == "table" then
-						ngx.log(ngx.ERR,"LIMIT ERROR")
-						ngx.exit(403)
-					end
-					table.insert( limit_var, v )
-				end
-			else
-				table.insert( limit_var, process_request_var )
-			end
-		end
-
-		process_key = table.concat( limit_var )  
-		if rule.rule_action == "limit_req_rate" then
-			limitreq.limit_req_rate(rule,ngx.md5(process_key))
-		elseif rule.rule_action == "limit_req_count" then
-			limitreq.limit_req_count(rule,ngx.md5(process_key))		
-		end
-		
-
-		else
-
-			local matchs_result = true
-			local ctx_rule_log = {}
-			for _,match in ipairs(rule.rule_matchs) do
-				local operator_result = false
-			
-				for _,var in ipairs(match.rule_vars) do
-					local process_request = _process_request(var)
-					local process_transform = _process_transform(process_request,match.rule_transform,var)
-					local _operator_result,_operator_value,_operator_key,captures = _process_operator(process_transform,match,var,rule)
-					
-					if _operator_result and rule.rule_log == "true" then
-                                                ctx_rule_log.rule_var = var.rule_var
-                                                ctx_rule_log.rule_operator = match.rule_operator
-                                                ctx_rule_log.rule_negated = match.rule_negated
-                                                ctx_rule_log.rule_transform = match.rule_transform
-												if ngx.get_phase() == "body_filter" then
-													ctx_rule_log.rule_match_var = var.rule_var
-												else
-													ctx_rule_log.rule_match_var = _operator_value
-												
-												end
-						
-						
-                                                ctx_rule_log.rule_match_key = _operator_key
-						ctx_rule_log.rule_uri = ngx.var.uri
-						ctx_rule_log.rule_remote_ip = ngx.var.remote_addr
-						ctx_rule_log.rule_match_captures = captures
-
-					end
-		
-                                	if  _operator_result then
-						operator_result = _operator_result
-						break
-                                	end
-				end	
-		
-				if (not operator_result) then
-					matchs_result = false
-					break
-				end
-				
-			     end
-                if matchs_result and rule.rule_log == "true" then                       
-                    ctx_rule_log.rule_id = rule.rule_id
-                    ctx_rule_log.rule_detail = rule.rule_detail
-                    ctx_rule_log.rule_serverity = rule.rule_serverity
-                    ctx_rule_log.rule_category = rule.rule_category
-                    ctx_rule_log.rule_action = rule.rule_action
-					if _config_info.log_all == "true" or rule.rule_log_all=="true" then
-						ctx_rule_log.rule_headers =  request.request['REQUEST_HEADERS']()
-						ctx_rule_log.rule_url = request.request['REQUEST_URI']()
-						ctx_rule_log.rule_raw_post =  ngx.req.get_body_data()
-					end
-					if rule.rule_action == "limit_req_rate" or rule.rule_action == "limit_req_count" then
-
-					else
-					ngx.ctx.rule_log = ctx_rule_log
-					end
-				end
-				if _config_info.observ_mode == "true" and matchs_result and rule.rule_log == "true" then
-				
-				
-						table_insert(rule_observ_log,ctx_rule_log)
-						matchs_result = false
-		
-				end
-	
-                if rule.rule_action == "pass" and matchs_result then
-					matchs_result = false
-				end
-			if   _config_info.limitreq_engine == "true" and matchs_result and (rule.rule_action == "limit_req_rate" or rule.rule_action == "limit_req_count") then
-				local process_key
-				local limit_var = {}
-				for _,var in ipairs(rule.rule_key_vars) do
-					local process_request_var = _process_request(var)
-					if type(process_request_var) == "table" then
-						for _,v in pairs(process_request_var) do
-							if type(v) == "table" then
-								ngx.log(ngx.ERR,"LIMIT ERROR")
-								ngx.exit(403)
-							end
-							table.insert( limit_var, v )
-						end
-					else
-						table.insert( limit_var, process_request_var )
-					end
-				end
-		
-				process_key = table.concat( limit_var )  
-				if rule.rule_action == "limit_req_rate" then
-					limitreq.limit_req_rate(rule,ngx.md5(process_key))
-				elseif rule.rule_action == "limit_req_count" then
-					limitreq.limit_req_count(rule,ngx.md5(process_key))
-				end
-				matchs_result = false
-			end	
-			
-			if matchs_result then
-				return matchs_result,rule
-			end
-		end
-
-	 
-
-
-	end
-	if _config_info.observ_mode == "true" then
-		ngx.ctx.rule_observ_log = rule_observ_log
-	end
-
-	return result
+local function _update_at(auto_update_period,global_update_rule)
+    if _auto_update == "true" then
+      local global_ok, global_err = ngx.timer.at(tonumber(auto_update_period),global_update_rule)
+      if not global_ok then
+        ngx.log(ngx.ERR, "failed to create the cycle timer: ", global_err)
+      end
+    end
 end
-
-
-
-function _M.rule_match(rules)
-
-	return _rule_match(rules)
-
-end
-
-
-      
-
-local function _base_update_rule()
-	local _base_update_rule = {}
-	local _resp_update_rule = {}
-	local _limit_req_rule = {}
-	local _update_website  =  _config_info.base_rule_update_website or "http://update.jxwaf.com/waf/update_rule"		
-	local httpc = http.new()
-	local api_key = _config_info.waf_api_key or "jxwaf"
-      	local res, err = httpc:request_uri( _update_website , {
-           method = "POST",
-           body = "api_key="..api_key,
-           headers = {
-            ["Content-Type"] = "application/x-www-form-urlencoded",
-           }
-      	})
-	if not res then
-        	ngx.log(ngx.ERR,"failed to request: ", err)
-		return
-      	end
-	
-	local read_body = res.body
-
-	
-	
-		
-	local _update_rule = cjson.decode(read_body)
-	if _update_rule == nil or #_update_rule == 0 then
-		ngx.log(ngx.ERR,"init fail,can not decode base rule config file")
-	end
-	for _,v in ipairs(_update_rule) do
-		if v.rule_phase == "resp" then
-			table_insert(_resp_update_rule,v)
-			if v.rule_action == "inject_js" or v.rule_action == "rewrite" or v.rule_action == "replace" then
-				_resp_header_chunk = true
-			end
-		else
-			if v.rule_action == "limit_req_rate" or v.rule_action == "limit_req_count" then
-				if _config_info.limitreq_engine == "true" then
-					table_insert(_limit_req_rule,v)
-				end
-			else
-				table_insert(_base_update_rule,v)
-			end
-		end
-	end	
-
-	table_sort(_resp_update_rule,_sort_rules)
-	table_sort(_base_update_rule,_sort_rules)
-	table_sort(_limit_req_rule,_sort_rules)
-	_rules =  _base_update_rule
-	_resp_rules = _resp_update_rule
-	_limit_req_rules = _limit_req_rule 
-	ngx.log(ngx.ALERT,"success load base rule,count is "..#_rules)
-	ngx.log(ngx.ALERT,"success load resp rule,count is "..#_resp_rules)
-	ngx.log(ngx.ALERT,"success load limit req rule,count is "..#_limit_req_rules)
-
-	
-end
-
 
 local function _global_update_rule()
-      
-        local _update_website  =  _config_info.global_rule_update_website or "http://update.jxwaf.com/waf/update_global_rule"
-        local httpc = http.new()
-        local api_key = _config_info.waf_api_key or "jxwaf"
-        local res, err = httpc:request_uri( _update_website , {
+    local _update_website  =  _config_info.waf_update_website or "http://update2.jxwaf.com/waf_update"
+    local httpc = http.new()
+    local api_key = _config_info.waf_api_key or ""
+    local api_password = _config_info.waf_api_password or ""
+    local res, err = httpc:request_uri( _update_website , {
 	
-           method = "POST",
-           body = "api_key="..api_key,
-           headers = {
-            ["Content-Type"] = "application/x-www-form-urlencoded",
-           }
-        })
-        if not res then
-                ngx.log(ngx.ERR,"failed to request: ", err)
-                return
-        end
-	local read_body = res.body
-	
-        local _update_rule = cjson.decode(read_body)
-	
-        if _update_rule == nil  then
-               ngx.log(ngx.ERR,"init fail,can not decode remote global rule")
-        end
-	_config_info.base_engine = _config_info.base_engine or _update_rule['base_engine'] or "true"
-	_config_info.log_all = _config_info.log_all or  _update_rule['log_all'] or "false"
-	_config_info.log_remote = _config_info.log_remote or  _update_rule['log_remote'] or "false"
-	_config_info.log_local = _config_info.log_local or  _update_rule['log_local'] or "true"
-	_config_info.http_redirect = _config_info.http_redirect or  _update_rule['http_redirect'] or "/"
-	_config_info.log_ip = _config_info.log_ip or  _update_rule['log_ip'] or "127.0.0.1"
-	_config_info.log_port = _config_info.log_port or  _update_rule['log_port'] or "5555"
-	_config_info.log_sock_type = _config_info.log_sock_type or  _update_rule['log_sock_type'] or "udp"
-	_config_info.log_flush_limit = _config_info.log_flush_limit or  _update_rule['log_flush_limit'] or "1"
-	_config_info.cookie_safe = _config_info.cookie_safe or _update_rule['cookie_safe'] or "true"
-	_config_info.cookie_safe_client_ip = _config_info.cookie_safe_client_ip or _update_rule['cookie_safe_client_ip'] or "true"
-	_config_info.cookie_safe_is_safe = _config_info.cookie_safe_is_safe or _update_rule['cookie_safe_is_safe'] or "false"	
-	_config_info.aes_random_key = _config_info.aes_random_key or _update_rule['aes_random_key'] or  str.to_hex(resty_random.bytes(8))
-	_config_info.observ_mode =  _config_info.observ_mode or _update_rule['observ_mode'] or "false"
-	--_config_info.observ_mode_white_ip =  _config_info.observ_mode_white_ip or _update_rule['observ_mode_white_ip'] or "false"
-	_config_info.resp_engine =  _config_info.resp_engine or _update_rule['resp_engine'] or "false"
-	_config_info.limitreq_engine = _config_info.limitreq_engine or _update_rule['cc_engine'] or "false"
-        ngx.log(ngx.ALERT,"success load global config ",_config_info.base_engine)
-	if _config_info.base_engine == "true" or _config_info.resp_engine == "true" or _config_info.limitreq_engine == "true" then
-		_base_update_rule()
-	end
-	
+        method = "POST",
+        body = "api_key="..api_key.."&api_password="..api_password,
+        headers = {
+        ["Content-Type"] = "application/x-www-form-urlencoded",
+        }
+    })
+    if not res then
+      ngx.log(ngx.ERR,"failed to request: ", err)
+      return _update_at(tonumber(_auto_update_period),_global_update_rule)
+    end
+		local res_body = cjson.decode(res.body)
+		if not res_body then
+      ngx.log(ngx.ERR,"init fail,failed to decode resp body " )
+      return _update_at(tonumber(_auto_update_period),_global_update_rule)
+		end
+    if  res_body['result'] == false then
+      ngx.log(ngx.ERR,"init fail,failed to request, ",res_body['message'])
+      return _update_at(tonumber(_auto_update_period),_global_update_rule)
+    end
+    _update_waf_rule = res_body['waf_rule']
+    if _update_waf_rule == nil  then
+      ngx.log(ngx.ERR,"init fail,can not decode waf rule")
+      return _update_at(tonumber(_auto_update_period),_global_update_rule)
+    end
+    _auto_update = res_body['auto_update']
+    _auto_update_period = res_body['auto_update_period']
+    if _auto_update == "true" then
+      local global_ok, global_err = ngx.timer.at(tonumber(_auto_update_period),_global_update_rule)
+      if not global_ok then
+        ngx.log(ngx.ERR, "failed to create the cycle timer: ", global_err)
+      end
+    end
+    ngx.log(ngx.ERR,cjson.encode(res_body))
 end
 
 
 
 function _M.init_worker()
 	if _config_info.waf_local == "false" then
-	local global_ok, global_err = ngx.timer.at(0,_global_update_rule)
-	if not global_ok then
-                ngx.log(ngx.ERR, "failed to create the global timer: ", global_err)
-        end
-	end
-end
-
-local function _local_base_update_rule()
-	local _base_update_rule = {}
-	local _resp_update_rule = {}
-	local _limit_req_rule = {}
-	local init_local_config_path =  _local_base_config_path
-	local read_local_config = assert(io.open(init_local_config_path,'r'))
-	local raw_local_config_info = read_local_config:read('*all')
-	read_local_config:close()
-	local _update_rule = cjson.decode(raw_local_config_info)
-	if _update_rule == nil or #_update_rule == 0 then
-		ngx.log(ngx.ERR,"init fail,can not decode base rule config file")
-	end
-	for _,v in ipairs(_update_rule) do
-		if v.rule_phase == "resp" then
-			table_insert(_resp_update_rule,v)
-			if v.rule_action == "inject_js" or v.rule_action == "rewrite" or v.rule_action == "replace" then
-				_resp_header_chunk = true
-			end
-		else
-			if v.rule_action == "limit_req_rate" or v.rule_action == "limit_req_count" then
-				if _config_info.limitreq_engine == "true" then
-					table_insert(_limit_req_rule,v)
-				end
-			else
-				table_insert(_base_update_rule,v)
-			end
-		end
-	end	
-
-	table_sort(_resp_update_rule,_sort_rules)
-	table_sort(_base_update_rule,_sort_rules)
-	table_sort(_limit_req_rule,_sort_rules)
-	_rules =  _base_update_rule
-	_resp_rules = _resp_update_rule
-	_limit_req_rules = _limit_req_rule 
-	ngx.log(ngx.ALERT,"success load base rule,count is "..#_rules)
-	ngx.log(ngx.ALERT,"success load resp rule,count is "..#_resp_rules)
-	ngx.log(ngx.ALERT,"success load limit req rule,count is "..#_limit_req_rules)
-
-	
+    local init_ok,init_err = ngx.timer.at(0,_global_update_rule)
+    if not init_ok then
+      ngx.log(ngx.ERR, "failed to create the init timer: ", init_err)
+    end
+  end
 end
 
 function _M.init(config_path)
+  require "resty.core"
 	local init_config_path = config_path or _config_path
 	local read_config = assert(io.open(init_config_path,'r'))
 	local raw_config_info = read_config:read('*all')
@@ -559,105 +256,272 @@ function _M.init(config_path)
 	if config_info == nil then
 		ngx.log(ngx.ERR,"init fail,can not decode config file")
 	end
-
 	_config_info = config_info
 	if _config_info.waf_local == "true" then
 		local init_local_config_path =  _local_config_path
 		local read_local_config = assert(io.open(init_local_config_path,'r'))
 		local raw_local_config_info = read_local_config:read('*all')
 		read_local_config:close()
-		local _update_rule = cjson.decode(raw_local_config_info)
-		_config_info.base_engine = _config_info.base_engine or _update_rule['base_engine'] or "true"
-		_config_info.log_all = _config_info.log_all or  _update_rule['log_all'] or "false"
-		_config_info.log_remote = _config_info.log_remote or  _update_rule['log_remote'] or "false"
-		_config_info.log_local = _config_info.log_local or  _update_rule['log_local'] or "true"
-		_config_info.http_redirect = _config_info.http_redirect or  _update_rule['http_redirect'] or "/"
-		_config_info.log_ip = _config_info.log_ip or  _update_rule['log_ip'] or "127.0.0.1"
-		_config_info.log_port = _config_info.log_port or  _update_rule['log_port'] or "5555"
-		_config_info.log_sock_type = _config_info.log_sock_type or  _update_rule['log_sock_type'] or "udp"
-		_config_info.log_flush_limit = _config_info.log_flush_limit or  _update_rule['log_flush_limit'] or "1"
-		_config_info.cookie_safe = _config_info.cookie_safe or _update_rule['cookie_safe'] or "true"
-		_config_info.cookie_safe_client_ip = _config_info.cookie_safe_client_ip or _update_rule['cookie_safe_client_ip'] or "true"
-		_config_info.cookie_safe_is_safe = _config_info.cookie_safe_is_safe or _update_rule['cookie_safe_is_safe'] or "false"	
-		_config_info.aes_random_key = _config_info.aes_random_key or _update_rule['aes_random_key'] or  str.to_hex(resty_random.bytes(8))
-		_config_info.observ_mode =  _config_info.observ_mode or _update_rule['observ_mode'] or "false"
-		--_config_info.observ_mode_white_ip =  _config_info.observ_mode_white_ip or _update_rule['observ_mode_white_ip'] or "false"
-		_config_info.resp_engine =  _config_info.resp_engine or _update_rule['resp_engine'] or "false"
-		_config_info.limitreq_engine = _config_info.limitreq_engine or _update_rule['cc_engine'] or "false"
-			ngx.log(ngx.ALERT,"success load global config ",_config_info.base_engine)
-		if _config_info.base_engine == "true" or _config_info.resp_engine == "true" or _config_info.limitreq_engine == "true" then
-			_local_base_update_rule()
-		end		
-
-
-
-	end
+		local res_body = cjson.decode(raw_local_config_info)
+    _update_waf_rule = res_body['waf_rule']
+    if _update_waf_rule == nil  then
+      ngx.log(ngx.ERR,"init fail,can not decode waf rule")
+    end
+  end
+  if not geo.initted() then
+    local r,errs = geo.init(_config_geo_path)
+    if errs then
+      ngx.log(ngx.ERR,errs)
+    end
+		ngx.log(ngx.ERR,"init geoip success")
+  end
+  if not geo.initted() then
+    ngx.log(ngx.ERR,"init geoip fail")
+  end
 end
 
 
-function _M.get_config_info()
+function _M.get_waf_rule()
 	
-	local config_info = _config_info
+	local update_waf_rule = _update_waf_rule
 
-	return config_info
-
-end
-
-function _M.get_resp_rule()
-
-	return  _resp_rules
+	return update_waf_rule
 
 end
 
-function _M.base_check()
-	if _config_info.base_engine == "true" then
-	local rules = _rules
-	if  #rules == 0 then
-		ngx.log(ngx.CRIT,"can not find rules")
-		return
-	--	ngx.exit(500)	
+local function _custom_rule_match(rules)
+	local result
+	for _,rule in ipairs(rules) do
+    local matchs_result = true
+    local ctx_rule_log = {}
+    for _,match in ipairs(rule.rule_matchs) do
+      local operator_result = false
+      for _,var in ipairs(match.rule_vars) do
+        local process_request = _process_request(var)
+        local process_transform = _process_transform(process_request,match.rule_transform,var)
+        local _operator_result,_operator_value,_operator_key = _process_operator(process_transform,match,var,rule)
+        if _operator_result and rule.rule_log == "true" then
+          ctx_rule_log.rule_var = var.rule_var
+          ctx_rule_log.rule_operator = match.rule_operator
+          ctx_rule_log.rule_transform = match.rule_transform
+					ctx_rule_log.rule_match_var = _operator_value
+          ctx_rule_log.rule_match_key = _operator_key
+          ctx_rule_log.rule_pattern = match.rule_pattern
+        end
+        if  _operator_result then
+          operator_result = _operator_result
+          break
+        end
+      end	
+      if (not operator_result) then
+        matchs_result = false
+        break
+      end
+    end
+    if matchs_result and rule.rule_log == "true" then                       
+      local rule_log = request.request['HTTP_FULL_INFO']()
+      rule_log['log_type'] = "protection_log"
+      rule_log['protection_type'] = "custom_rule"
+      rule_log['protection_info'] = "custom_rule_info"
+      rule_log['rule_id'] = rule.rule_id
+      rule_log['rule_name'] = rule.rule_name
+      rule_log['rule_level'] = rule.rule_level
+      rule_log['rule_action'] = rule.rule_action
+      rule_log['rule_var'] = ctx_rule_log.rule_var
+      rule_log['rule_operator'] = ctx_rule_log.rule_operator
+      rule_log['rule_transform'] = ctx_rule_log.rule_transform
+      rule_log['rule_pattern'] = ctx_rule_log.rule_pattern
+      rule_log['rule_match_var'] = ctx_rule_log.rule_match_var
+      rule_log['rule_match_key'] = ctx_rule_log.rule_match_ke
+      ngx.ctx.rule_log = rule_log
+    end
+    if rule.rule_action == "pass" and matchs_result then
+      matchs_result = false
+    end
+    if matchs_result then
+      return matchs_result,rule
+    end
 	end
-	local result,rule = _rule_match(rules)	
-	
-	if result then
-		if rule.rule_action == 'deny' then
-			ngx.exit(403)
-		elseif rule.rule_action == 'allow' then
-			ngx.exit(0)
-		elseif rule.rule_action == 'redirect' then
-			ngx.redirect(_config_info.http_redirect)
-		elseif rule.rule_action == 'rewrite' then
---			ngx.ctx.resp_action = "rewrite"
---			ngx.ctx.resp_rewrite_data = rule.rule_action_data
-			ngx.header["Content-Type"] = "text/html; charset=utf-8"
-			ngx.say(ngx.decode_base64(rule.rule_action_data))		
-		elseif rule.rule_action == 'inject_js' then
-			ngx.ctx.resp_action = "inject_js"
-			ngx.ctx.resp_inject_js_data = rule.rule_action_data
-		elseif rule.rule_action == "replace" then
-			ngx.ctx.resp_action = "replace"
-			ngx.ctx.resp_replace_check = rule.rule_action_data
-			ngx.ctx.resp_replace_data = rule.rule_action_replace_data
-		else
-			ngx.log(ngx.ERR,"rule action ERR!")
+	return result
+end
+
+function _M.custom_rule_check()
+	local host = ngx.var.host
+  local scheme = ngx.var.scheme
+  local req_host = _update_waf_rule[host]
+	if req_host and req_host['domain_set'][scheme] == "true" then
+		if req_host["protection_set"]["custom_protection"] == "true"  and #req_host["custom_rule_set"]  ~= 0 then
+      local result,match_rule = _custom_rule_match(req_host["custom_rule_set"])
+      if result then
+        if match_rule.rule_action == 'deny' then
+          ngx.exit(403)
+        elseif match_rule.rule_action == 'allow' then
+          ngx.exit(0)
+        end
+      end
+		end
+	else
+    ngx.exit(403)
+	end
+  
+end
+
+
+function _M.geo_protection()
+  local host = ngx.var.host
+  local req_host = _update_waf_rule[host]
+	if req_host and req_host["protection_set"]["geo_protection"] == "true" then
+		local res,err = geo.lookup(ngx.var.remote_addr)
+		if res then
+			if res.country.names.en ~= "China" then
+        local rule_log = request.request['HTTP_FULL_INFO']()
+        rule_log['log_type'] = "protection_log"
+        rule_log['protection_type'] = "geo_protection"
+        rule_log['protection_info'] = "geo_protection_info"
+        rule_log['country'] = res.country.names.en
+        ngx.ctx.rule_log = rule_log
+				ngx.exit(400)
+			end
 		end
 	end
-
-	end
 end
+
+function _M.redirect_https()
+  local scheme = ngx.var.scheme
+  if scheme == "https" then
+    return
+  end
+  local host = ngx.var.host
+  local req_host = _update_waf_rule[host]
+	if req_host and  req_host['domain_set']['redirect_https'] == "true"  then
+    ngx.header.content_type = "text/html"
+    ngx.say([=[ <script type="text/javascript">
+      var targetProtocol = "https:";
+      if (window.location.protocol != targetProtocol)
+      window.location.href = targetProtocol +
+      window.location.href.substring(window.location.protocol.length);
+      </script>
+      ]=] )
+  end
+end
+
+
 
 function _M.limitreq_check()
-	if _config_info.limitreq_engine == "true" then
-		local rules = _limit_req_rules
-		if #rules == 0 then
-			ngx.log(ngx.CRIT,"can not find limitreq rules")	
-			ngx.exit(500)
-		end
-		local result = _rule_match(rules)	
+  local host = ngx.var.host
+  local req_host = _update_waf_rule[host]
+	if req_host and req_host["protection_set"]["cc_protection"] == "true"  then
+			local req_rate_rule = {}
+			local req_count_rule = {}
+			local req_domain_rule = {}
+			req_count_rule['rule_rate_count'] = req_host['cc_protection_set']['count']
+			req_count_rule['rule_burst_time'] = req_host['cc_protection_set']['black_ip_time']
+			req_rate_rule['rule_rate_count'] = req_host['cc_protection_set']['ip_qps']
+			req_rate_rule['rule_burst_time'] = req_host['cc_protection_set']['ip_expire_qps']
+			req_domain_rule['domain_qps'] = req_host['cc_protection_set']['domain_qps']
+			req_domain_rule['attack_count'] = req_host['cc_protection_set']['attack_count'] 
+			req_domain_rule['attack_black_ip_time'] = req_host['cc_protection_set']['attack_black_ip_time']
+			req_domain_rule['attack_ip_qps'] = req_host['cc_protection_set']['attack_ip_qps']
+			req_domain_rule['attack_ip_expire_qps'] = req_host['cc_protection_set']['attack_ip_expire_qps']
+			limitreq.limit_req_count(req_count_rule,ngx_md5(ngx.var.remote_addr))
+      limitreq.limit_req_rate(req_rate_rule,ngx_md5(ngx.var.remote_addr))
+			limitreq.limit_req_domain_rate(req_domain_rule,ngx_md5(host))
+	end
 	
-		
+end
+
+function _M.attack_ip_protection()
+  local host = ngx.var.host
+  local req_host = _update_waf_rule[host]
+	if req_host and req_host["protection_set"]["attack_ip_protection"] == "true"  then
+			local req_count_rule = {}
+			req_count_rule['rule_rate_count'] = req_host['protection_set']['attack_ip_protection_count']
+			req_count_rule['rule_burst_time'] = req_host['protection_set']['attack_ip_protection_time']
+			limitreq.limit_attack_ip(req_count_rule,ngx_md5(ngx.var.remote_addr),false)
 	end
 end
+
+
+
+
+local function _owasp_rule_match(rules)
+	local result
+	for _,rule in ipairs(rules) do
+    local matchs_result = true
+    local ctx_rule_log = {}
+    for _,match in ipairs(rule.rule_matchs) do
+      local operator_result = false
+      for _,var in ipairs(match.rule_vars) do
+        local process_request = _process_request(var)
+        local process_transform = _process_transform(process_request,match.rule_transform,var)
+        local _operator_result,_operator_value,_operator_key = _process_operator(process_transform,match,var,rule)
+        if _operator_result and rule.rule_log == "true" then
+          ctx_rule_log.rule_var = var.rule_var
+          ctx_rule_log.rule_operator = match.rule_operator
+          ctx_rule_log.rule_transform = match.rule_transform
+					ctx_rule_log.rule_match_var = _operator_value
+          ctx_rule_log.rule_match_key = _operator_key
+          ctx_rule_log.rule_pattern = match.rule_pattern
+        end
+        if  _operator_result then
+          operator_result = _operator_result
+          break
+        end
+      end	
+      if (not operator_result) then
+        matchs_result = false
+        break
+      end
+    end
+    if matchs_result and rule.rule_log == "true" then                       
+      local rule_log = request.request['HTTP_FULL_INFO']()
+      rule_log['log_type'] = "protection_log"
+      rule_log['protection_type'] = "owasp_rule"
+      rule_log['protection_info'] = "owasp_rule_info"
+      rule_log['rule_id'] = rule.rule_id
+      rule_log['rule_name'] = rule.rule_name
+      rule_log['rule_level'] = rule.rule_level
+      rule_log['rule_action'] = rule.rule_action
+      rule_log['rule_var'] = ctx_rule_log.rule_var
+      rule_log['rule_operator'] = ctx_rule_log.rule_operator
+      rule_log['rule_transform'] = ctx_rule_log.rule_transform
+      rule_log['rule_pattern'] = ctx_rule_log.rule_pattern
+      rule_log['rule_match_var'] = ctx_rule_log.rule_match_var
+      rule_log['rule_match_key'] = ctx_rule_log.rule_match_ke
+      ngx.ctx.rule_log = rule_log
+    end
+    if rule.rule_action == "pass" and matchs_result then
+      matchs_result = false
+    end
+    if matchs_result then
+      return matchs_result,rule
+    end
+	end
+	return result
+end
+
+function _M.owasp_rule_check()
+	local host = ngx.var.host
+  local req_host = _update_waf_rule[host]
+	if req_host and req_host['protection_set']['owasp_protection'] == "true" and #req_host["owasp_rule_set"] ~= 0 then
+    local result,match_rule = _owasp_rule_match(req_host["owasp_rule_set"])
+    if result then
+      if match_rule.rule_action == 'deny' then
+        if req_host["protection_set"]["attack_ip_protection"] == "true"  then
+          local req_count_rule = {}
+          req_count_rule['rule_rate_count'] = req_host['protection_set']['attack_ip_protection_count']
+          req_count_rule['rule_burst_time'] = req_host['protection_set']['attack_ip_protection_time']
+          limitreq.limit_attack_ip(req_count_rule,ngx_md5(ngx.var.remote_addr),true)
+        end
+        ngx.exit(403)
+      elseif match_rule.rule_action == 'allow' then
+        ngx.exit(0)
+      end
+    end
+	end
+end
+
+
 
 function _M.access_init()
 	local content_type = ngx.req.get_headers()["Content-type"]
