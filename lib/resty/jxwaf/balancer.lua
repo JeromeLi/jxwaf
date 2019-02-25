@@ -30,8 +30,13 @@ if balance_host then
 	end
 	local ok,err = balancer.set_current_peer(_host,port)
 	if not ok then
-        	ngx.log(ngx.ERR,"failed to set the current peer: ",err)
-        	return ngx.exit(500)
+    local error_info = request.request['HTTP_FULL_INFO']()
+    error_info['log_type'] = "error_log"
+    error_info['error_type'] = "balancer"
+    error_info['error_info'] = "failed to set the current peer: "..err
+    ngx.ctx.error_log = error_info
+    ngx.log(ngx.ERR,"failed to set the current peer: ",err)
+    return ngx.exit(500)
 	end
 else
 	ngx.exit(403)
