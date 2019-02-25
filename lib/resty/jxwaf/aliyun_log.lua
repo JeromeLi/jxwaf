@@ -104,8 +104,8 @@ local producer_config = aliyun_log.create_log_producer_config()
 aliyun_log.log_producer_config_set_endpoint(producer_config, "http://cn-beijing.log.aliyuncs.com");
 aliyun_log.log_producer_config_set_project(producer_config, "jxwaf-log");
 aliyun_log.log_producer_config_set_logstore(producer_config, "jxwaf-log01");
-aliyun_log.log_producer_config_set_access_id(producer_config, "LTAITjHSCOO2FrVW");
-aliyun_log.log_producer_config_set_access_key(producer_config, "idcpoOb6hujOpShBwCECFY9S6BIUJQ");
+aliyun_log.log_producer_config_set_access_id(producer_config, "*");
+aliyun_log.log_producer_config_set_access_key(producer_config, "*");
 aliyun_log.log_producer_config_set_topic(producer_config, "topic_test")
 aliyun_log.log_producer_config_add_tag(producer_config, "jxwaf111","1111")
 aliyun_log.log_producer_config_set_source(producer_config, "jxwaf")
