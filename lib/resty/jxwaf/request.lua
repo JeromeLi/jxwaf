@@ -71,7 +71,7 @@ local function _parse_request_body()
 		ngx.exit(403)
 	end
 
-	if content_type and  ngx.re.find(content_type, [=[^multipart/form-data]=],"oij") and tonumber(ngx.req.get_headers()["Content-Length"]) ~= 0 then
+	if content_type and  ngx.re.find(content_type, [=[^multipart/form-data]=],"oij") and ngx.req.get_headers()["Content-Length"] and tonumber(ngx.req.get_headers()["Content-Length"]) ~= 0 then
                 ngx.ctx.parse_request_body = {}
                 return {}
   end
@@ -81,7 +81,7 @@ local function _parse_request_body()
 		ngx.exit(503)
 	end
 	
-	if content_type and  ngx.re.find(content_type, [=[^application/json;]=],"oij") and tonumber(ngx.req.get_headers()["Content-Length"]) ~= 0 then
+	if content_type and  ngx.re.find(content_type, [=[^application/json;]=],"oij") and ngx.req.get_headers()["Content-Length"] and tonumber(ngx.req.get_headers()["Content-Length"]) ~= 0 then
 	
 		local json_args_raw = ngx.req.get_body_data()
 		if not json_args_raw then
